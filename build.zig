@@ -39,6 +39,7 @@ pub fn build(b: *std.Build) void {
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
+        .optimize = optimize,
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -139,6 +140,19 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    const bench = b.addExecutable(.{
+        .name = "hex-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "hex_zig", .module = mod }},
+        }),
+    });
+    const run_bench = b.addRunArtifact(bench);
+    const bench_step = b.step("bench", "Compare SIMD hex encoding and decoding with scalar implementations (use -Doptimize=ReleaseFast)");
+    bench_step.dependOn(&run_bench.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
