@@ -13,6 +13,10 @@ fn encodeHexScalar(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     return output;
 }
 
+fn encodeHexSimd(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+    return hex.encodeHex(alloc, input, .lower);
+}
+
 fn decodeHexScalar(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     if (input.len % 2 != 0) return error.InvalidHexLength;
     const output = try alloc.alloc(u8, input.len / 2);
@@ -65,14 +69,14 @@ pub fn main(init: std.process.Init) !void {
     {
         const expected = try encodeHexScalar(alloc, input);
         defer alloc.free(expected);
-        const actual = try hex.encodeHex(alloc, input);
+        const actual = hex.encodeHex(alloc, input, .lower);
         defer alloc.free(actual);
         if (!std.mem.eql(u8, expected, actual)) return error.IncorrectEncode;
 
         std.debug.print("encode bytes      scalar      SIMD    speedup\n", .{});
         for (sizes) |size| {
             const scalar = try measure(encodeHexScalar, init.io, input[0..size], scratch[0 .. size * 2]);
-            const simd = try measure(hex.encodeHex, init.io, input[0..size], scratch[0 .. size * 2]);
+            const simd = try measure(encodeHexSimd, init.io, input[0..size], scratch[0 .. size * 2]);
             std.debug.print("{d: >11}    {d: >7.2}   {d: >7.2}    {d:.2}x\n", .{ size, scalar, simd, simd / scalar });
         }
     }

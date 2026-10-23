@@ -1,26 +1,39 @@
+//! SIMD-accelerated hexadecimal encoding and decoding.
+//! Free returned slices with the allocator passed to the conversion function.
+
 const std = @import("std");
 
 const vector_length = std.simd.suggestVectorLength(u8);
 const block_size = vector_length orelse 16;
 const ByteBlock = @Vector(block_size, u8);
 
-/// Encodes bytes as lowercase ASCII hexadecimal, using two characters per byte.
+/// Letter case used when encoding hexadecimal digits.
+pub const Case = enum {
+    upper,
+    lower,
+};
+
+const ALPHABET_LOWER = "0123456789abcdef";
+const ALPHABET_UPPER = "0123456789ABCDEF";
+
+/// Encodes bytes as ASCII hexadecimal in the requested case, using two characters per byte.
 /// The caller owns the returned slice and must free it with `alloc`.
-pub fn encodeHex(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
-    const output_len = std.math.mul(usize, input.len, 2) catch return error.OutOfMemory;
-    const output = try alloc.alloc(u8, output_len);
+/// Empty input requires no allocation. Panics if allocation fails.
+pub fn encodeHex(alloc: std.mem.Allocator, input: []const u8, case: Case) []u8 {
+    if (input.len == 0) return "";
+    const output = alloc.alloc(u8, input.len * 2) catch @panic("Out of memory");
 
     var i: usize = 0;
     if (vector_length != null) {
         while (input.len - i >= block_size) : (i += block_size) {
             const bytes: ByteBlock = input[i..][0..block_size].*;
-            const hi = nibblesToHex(bytes >> @splat(4));
-            const lo = nibblesToHex(bytes & @as(ByteBlock, @splat(0x0f)));
+            const hi = nibblesToHex(bytes >> @splat(4), case);
+            const lo = nibblesToHex(bytes & @as(ByteBlock, @splat(0x0f)), case);
             output[i * 2 ..][0 .. block_size * 2].* = std.simd.interlace(.{ hi, lo });
         }
     }
 
-    const alphabet = "0123456789abcdef";
+    const alphabet = if (case == .upper) ALPHABET_UPPER else ALPHABET_LOWER;
     while (i < input.len) : (i += 1) {
         output[i * 2] = alphabet[input[i] >> 4];
         output[i * 2 + 1] = alphabet[input[i] & 0x0f];
@@ -28,13 +41,19 @@ pub fn encodeHex(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     return output;
 }
 
-fn nibblesToHex(nibbles: ByteBlock) ByteBlock {
+fn nibblesToHex(nibbles: ByteBlock, case: Case) ByteBlock {
     const is_digit = nibbles < @as(ByteBlock, @splat(10));
-    return nibbles + @select(u8, is_digit, @as(ByteBlock, @splat('0')), @as(ByteBlock, @splat('a' - 10)));
+    const result = blk: switch (case) {
+        inline .upper => break :blk nibbles + @select(u8, is_digit, @as(ByteBlock, @splat('0')), @as(ByteBlock, @splat('A' - 10))),
+        inline .lower => break :blk nibbles + @select(u8, is_digit, @as(ByteBlock, @splat('0')), @as(ByteBlock, @splat('a' - 10))),
+    };
+    return result;
 }
 
 /// Decodes ASCII hexadecimal, accepting both uppercase and lowercase letters.
 /// The caller owns the returned slice and must free it with `alloc`.
+/// Returns `InvalidHexLength`, `InvalidCharacter`, or `OutOfMemory` on failure.
+/// Empty input requires no allocation.
 pub fn decodeHex(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     if (input.len % 2 != 0) {
         return error.InvalidHexLength;
@@ -77,56 +96,65 @@ pub fn decodeHex(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
 
 test "encodeHex accepts empty input and emits lowercase hex" {
     const alloc = std.testing.allocator;
-    const empty = try encodeHex(alloc, "");
+    const empty = encodeHex(alloc, "", .lower);
     defer alloc.free(empty);
     try std.testing.expectEqualSlices(u8, "", empty);
 
-    const encoded = try encodeHex(alloc, "\x00\x01\x09\x0a\x0f\x10\x7f\x80\xab\xcd\xef\xffHello");
+    const encoded = encodeHex(alloc, "\x00\x01\x09\x0a\x0f\x10\x7f\x80\xab\xcd\xef\xffHello", .lower);
     defer alloc.free(encoded);
     try std.testing.expectEqualSlices(u8, "0001090a0f107f80abcdefff48656c6c6f", encoded);
 }
 
-test "encodeHex handles every byte value in every SIMD lane and the scalar tail" {
+test "encodeHex handles every byte value in both cases across SIMD lanes and the scalar tail" {
     const alloc = std.testing.allocator;
     var input: [block_size * 2 + 1]u8 = undefined;
     for (0..256) |value| {
         @memset(&input, @intCast(value));
-        const expected = std.fmt.bytesToHex(input, .lower);
-        const encoded = try encodeHex(alloc, &input);
-        defer alloc.free(encoded);
-        try std.testing.expectEqualSlices(u8, &expected, encoded);
+        const lower = std.fmt.bytesToHex(input, .lower);
+        const upper = std.fmt.bytesToHex(input, .upper);
+        for ([_]Case{ .lower, .upper }) |case| {
+            const expected: []const u8 = if (case == .upper) &upper else &lower;
+            const encoded = encodeHex(alloc, &input, case);
+            defer alloc.free(encoded);
+            try std.testing.expectEqualSlices(u8, expected, encoded);
+        }
     }
 }
 
-test "encodeHex handles SIMD boundaries, unaligned input, and round trips" {
+test "encodeHex handles both cases across SIMD boundaries, unaligned input, and round trips" {
     const alloc = std.testing.allocator;
     const input_len = block_size * 3 + 17;
     var storage: [input_len + 3]u8 = undefined;
     for (0..4) |offset| {
         const input = storage[offset..][0..input_len];
         for (input, 0..) |*byte, i| byte.* = @truncate(i * 73 + offset * 17);
-        const expected = std.fmt.bytesToHex(input.*, .lower);
+        const lower = std.fmt.bytesToHex(input.*, .lower);
+        const upper = std.fmt.bytesToHex(input.*, .upper);
 
-        for (0..input.len + 1) |len| {
-            const encoded = try encodeHex(alloc, input[0..len]);
-            defer alloc.free(encoded);
-            try std.testing.expectEqualSlices(u8, expected[0 .. len * 2], encoded);
+        for ([_]Case{ .lower, .upper }) |case| {
+            const expected: []const u8 = if (case == .upper) &upper else &lower;
+            for (0..input.len + 1) |len| {
+                const encoded = encodeHex(alloc, input[0..len], case);
+                defer alloc.free(encoded);
+                try std.testing.expectEqualSlices(u8, expected[0 .. len * 2], encoded);
 
-            const decoded = try decodeHex(alloc, encoded);
-            defer alloc.free(decoded);
-            try std.testing.expectEqualSlices(u8, input[0..len], decoded);
+                const decoded = try decodeHex(alloc, encoded);
+                defer alloc.free(decoded);
+                try std.testing.expectEqualSlices(u8, input[0..len], decoded);
+            }
         }
     }
 }
 
-test "encodeHex handles allocation failure and needs no allocation for empty input" {
+test "encodeHex needs no allocation for empty input in either case" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     const alloc = failing.allocator();
-    const empty = try encodeHex(alloc, "");
-    defer alloc.free(empty);
-    try std.testing.expectEqualSlices(u8, "", empty);
-    try std.testing.expect(!failing.has_induced_failure);
-    try std.testing.expectError(error.OutOfMemory, encodeHex(alloc, "a"));
+    for ([_]Case{ .lower, .upper }) |case| {
+        const empty = encodeHex(alloc, "", case);
+        defer alloc.free(empty);
+        try std.testing.expectEqualSlices(u8, "", empty);
+        try std.testing.expect(!failing.has_induced_failure);
+    }
 }
 
 test "decodeHex accepts empty input and mixed case" {
