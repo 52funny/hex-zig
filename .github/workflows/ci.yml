@@ -26,13 +26,12 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Set up Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        # Reads minimum_zig_version from build.zig.zon and caches Zig build data.
+        uses: mlugg/setup-zig@v2
 
       - name: Check formatting
         if: runner.os == 'Linux'
