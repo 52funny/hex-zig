@@ -22,7 +22,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const dependency = b.dependency("hex_zig", .{
+    const hex_zig = b.dependency("hex_zig", .{
         .target = target,
         .optimize = optimize,
     });
@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    exe.root_module.addImport("hex_zig", dependency.module("hex_zig"));
+    exe.root_module.addImport("hex_zig", hex_zig.module("hex_zig"));
     b.installArtifact(exe);
 }
 ```
@@ -72,6 +72,44 @@ pub fn decodeHex(alloc: std.mem.Allocator, input: []const u8) ![]u8;
 - `encodeHex` produces two hexadecimal characters per input byte. It panics if allocation fails.
 - `decodeHex` accepts `0-9`, `a-f`, and `A-F`. It returns `error.InvalidHexLength` for odd-length input, `error.InvalidCharacter` for invalid characters, or `error.OutOfMemory` if allocation fails.
 - Both functions accept empty input without allocating. Free the returned slices with the same allocator, including empty slices.
+
+## Benchmarks
+
+Sample results on an **AMD Ryzen 7 8845H**, Linux x86_64, using **Zig 0.17.0**, **ReleaseFast**, and a **64-byte SIMD vector width**.
+
+To reproduce:
+
+```sh
+zig build bench -Doptimize=ReleaseFast
+```
+
+Each measurement reports the median of five samples. Throughput is measured in **GiB/s of input bytes**; decoding input sizes count hexadecimal characters. Allocations and frees use a `FixedBufferAllocator` backed by a reused scratch buffer.
+
+### Encoding (lowercase)
+
+The scalar reference uses a hexadecimal lookup table.
+
+| Input size | Scalar (GiB/s) | hex-zig (GiB/s) | Speedup |
+| --- | ---: | ---: | ---: |
+| 16 B | 1.25 | 0.51 | 0.41x |
+| 64 B | 1.73 | 6.62 | 3.82x |
+| 1 KiB | 2.36 | 18.36 | 7.77x |
+| 64 KiB | 2.40 | 39.95 | 16.63x |
+| 1 MiB | 2.39 | 32.48 | 13.60x |
+
+### Decoding
+
+The reference uses `std.fmt.hexToBytes`. Input contains mixed-case hexadecimal characters.
+
+| Input size | std.fmt.hexToBytes (GiB/s) | hex-zig (GiB/s) | Speedup |
+| --- | ---: | ---: | ---: |
+| 16 B | 1.90 | 1.90 | 1.00x |
+| 64 B | 1.81 | 10.48 | 5.80x |
+| 1 KiB | 1.37 | 29.19 | 21.36x |
+| 64 KiB | 0.27 | 29.38 | 109.02x |
+| 1 MiB | 0.22 | 28.59 | 128.27x |
+
+Inputs shorter than the SIMD block use scalar code. These results describe one run on the machine above; throughput varies with hardware, CPU frequency, cache state, and system load.
 
 ## Development
 
