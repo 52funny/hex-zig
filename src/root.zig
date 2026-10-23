@@ -13,8 +13,8 @@ pub const Case = enum {
     lower,
 };
 
-const ALPHABET_LOWER = "0123456789abcdef";
-const ALPHABET_UPPER = "0123456789ABCDEF";
+const alphabet_lower = "0123456789abcdef";
+const alphabet_upper = "0123456789ABCDEF";
 
 /// Encodes bytes as ASCII hexadecimal in the requested case, using two characters per byte.
 /// The caller owns the returned slice and must free it with `alloc`.
@@ -33,7 +33,7 @@ pub fn encodeHex(alloc: std.mem.Allocator, input: []const u8, case: Case) []u8 {
         }
     }
 
-    const alphabet = if (case == .upper) ALPHABET_UPPER else ALPHABET_LOWER;
+    const alphabet = if (case == .upper) alphabet_upper else alphabet_lower;
     while (i < input.len) : (i += 1) {
         output[i * 2] = alphabet[input[i] >> 4];
         output[i * 2 + 1] = alphabet[input[i] & 0x0f];
