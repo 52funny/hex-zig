@@ -1,5 +1,7 @@
 //! SIMD-accelerated hexadecimal encoding and decoding.
-//! Free returned slices with the allocator passed to the conversion function.
+//! `encodeHex` and `decodeHex` allocate results; free them with the same allocator.
+//! `encodeHexInto` and `decodeHexInto` borrow caller-provided output buffers and
+//! return the written prefix without allocating. Their input and output must not overlap.
 
 const std = @import("std");
 
@@ -19,9 +21,24 @@ const alphabet_upper = "0123456789ABCDEF";
 /// Encodes bytes as ASCII hexadecimal in the requested case, using two characters per byte.
 /// The caller owns the returned slice and must free it with `alloc`.
 /// Empty input requires no allocation. Panics if allocation fails.
+/// Requires `input.len * 2` to fit in `usize`. No null terminator is appended.
 pub fn encodeHex(alloc: std.mem.Allocator, input: []const u8, case: Case) []u8 {
     if (input.len == 0) return "";
     const output = alloc.alloc(u8, input.len * 2) catch @panic("Out of memory");
+    _ = encodeHexInto(input, output, case) catch unreachable;
+    return output;
+}
+
+/// Encodes bytes as ASCII hexadecimal in the requested case without allocating.
+/// Requires non-overlapping input and output and capacity for two characters per input byte.
+/// Returns `error.BufferTooSmall` before writing if the output buffer is too small.
+/// On success, returns `output[0 .. input.len * 2]` and leaves the remaining bytes unchanged.
+/// The returned slice borrows `output`; its lifetime and ownership follow that buffer.
+/// Empty input returns `output[0..0]` without writing. No null terminator is appended.
+pub fn encodeHexInto(input: []const u8, output: []u8, case: Case) error{BufferTooSmall}![]u8 {
+    if (input.len > output.len / 2) {
+        return error.BufferTooSmall;
+    }
 
     var i: usize = 0;
     if (vector_length != null) {
@@ -38,7 +55,7 @@ pub fn encodeHex(alloc: std.mem.Allocator, input: []const u8, case: Case) []u8 {
         output[i * 2] = alphabet[input[i] >> 4];
         output[i * 2 + 1] = alphabet[input[i] & 0x0f];
     }
-    return output;
+    return output[0 .. input.len * 2];
 }
 
 fn nibblesToHex(nibbles: ByteBlock, case: Case) ByteBlock {
@@ -51,9 +68,12 @@ fn nibblesToHex(nibbles: ByteBlock, case: Case) ByteBlock {
 }
 
 /// Decodes ASCII hexadecimal, accepting both uppercase and lowercase letters.
+/// Accepts only `0-9`, `a-f`, and `A-F`, without prefixes, separators, or whitespace.
 /// The caller owns the returned slice and must free it with `alloc`.
-/// Returns `InvalidHexLength`, `InvalidCharacter`, or `OutOfMemory` on failure.
-/// Empty input requires no allocation.
+/// Returns `error.InvalidHexLength` for odd-length input before allocating.
+/// Otherwise, allocation precedes character validation: returns `error.OutOfMemory`
+/// if allocation fails or `error.InvalidCharacter` for invalid input, freeing the result on failure.
+/// Empty input requires no allocation. No null terminator is appended.
 pub fn decodeHex(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     if (input.len % 2 != 0) {
         return error.InvalidHexLength;
@@ -61,6 +81,25 @@ pub fn decodeHex(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
 
     const output = try alloc.alloc(u8, input.len / 2);
     errdefer alloc.free(output);
+
+    return decodeHexInto(input, output) catch |err| switch (err) {
+        error.BufferTooSmall => unreachable,
+        else => return err,
+    };
+}
+
+/// Decodes ASCII hexadecimal into a caller-provided buffer without allocating.
+/// Accepts only `0-9`, `a-f`, and `A-F`, including mixed case.
+/// Requires non-overlapping input and output and capacity for `input.len / 2` bytes.
+/// Checks odd input length first (`error.InvalidHexLength`), then output capacity
+/// (`error.BufferTooSmall`); either error leaves the output unchanged.
+/// Invalid characters return `error.InvalidCharacter` and may leave partially written output.
+/// On success, returns `output[0 .. input.len / 2]` and leaves the remaining bytes unchanged.
+/// The returned slice borrows `output`; its lifetime and ownership follow that buffer.
+/// Empty input returns `output[0..0]` without writing. No null terminator is appended.
+pub fn decodeHexInto(input: []const u8, output: []u8) error{ InvalidHexLength, BufferTooSmall, InvalidCharacter }![]u8 {
+    if (input.len % 2 != 0) return error.InvalidHexLength;
+    if (output.len < input.len / 2) return error.BufferTooSmall;
 
     var i: usize = 0;
     if (vector_length != null) {
@@ -91,7 +130,7 @@ pub fn decodeHex(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
         output[i / 2] = (hi << 4) | lo;
     }
 
-    return output;
+    return output[0 .. input.len / 2];
 }
 
 test "encodeHex accepts empty input and emits lowercase hex" {
@@ -223,4 +262,82 @@ test "decodeHex rejects odd lengths before allocating" {
 test "decodeHex propagates allocation failure" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, decodeHex(failing.allocator(), "00"));
+}
+
+test "encodeHexInto returns the written prefix and preserves surrounding bytes across SIMD boundaries" {
+    var input: [block_size * 3 + 17]u8 = undefined;
+    for (&input, 0..) |*byte, i| byte.* = @truncate(i * 73);
+    const lower = std.fmt.bytesToHex(input, .lower);
+    const upper = std.fmt.bytesToHex(input, .upper);
+    var storage: [input.len * 2 + 3]u8 = undefined;
+
+    for ([_]Case{ .lower, .upper }) |case| {
+        const expected: []const u8 = if (case == .upper) &upper else &lower;
+        for (0..input.len + 1) |len| {
+            @memset(&storage, 0xcc);
+            const output = storage[1 .. storage.len - 1];
+            const result = try encodeHexInto(input[0..len], output, case);
+            try std.testing.expectEqualSlices(u8, expected[0 .. len * 2], result);
+            try std.testing.expect(result.ptr == output.ptr);
+            try std.testing.expectEqual(@as(u8, 0xcc), storage[0]);
+            for (storage[1 + result.len ..]) |byte| try std.testing.expectEqual(@as(u8, 0xcc), byte);
+        }
+    }
+}
+
+test "encodeHexInto checks capacity before writing and accepts exact and empty buffers" {
+    var output: [4]u8 = @splat(0xcc);
+    try std.testing.expectError(error.BufferTooSmall, encodeHexInto("AB", output[0..3], .lower));
+    try std.testing.expectError(error.BufferTooSmall, encodeHexInto("A", output[0..0], .lower));
+    for (output) |byte| try std.testing.expectEqual(@as(u8, 0xcc), byte);
+    try std.testing.expectEqualStrings("4142", try encodeHexInto("AB", &output, .lower));
+    const before = output;
+    const empty = try encodeHexInto("", output[0..0], .upper);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+    try std.testing.expect(empty.ptr == output[0..].ptr);
+    try std.testing.expectEqualSlices(u8, &before, &output);
+}
+
+test "decodeHexInto returns the written prefix and preserves surrounding bytes across SIMD boundaries" {
+    var expected: [block_size * 3 + 17]u8 = undefined;
+    for (&expected, 0..) |*byte, i| byte.* = @truncate(i * 73);
+    var encoded = std.fmt.bytesToHex(expected, .lower);
+    for (&encoded, 0..) |*char, i| {
+        if (i % 3 == 0) char.* = std.ascii.toUpper(char.*);
+    }
+    var storage: [expected.len + 3]u8 = undefined;
+
+    for (0..expected.len + 1) |len| {
+        @memset(&storage, 0xcc);
+        const output = storage[1 .. storage.len - 1];
+        const result = try decodeHexInto(encoded[0 .. len * 2], output);
+        try std.testing.expectEqualSlices(u8, expected[0..len], result);
+        try std.testing.expect(result.ptr == output.ptr);
+        try std.testing.expectEqual(@as(u8, 0xcc), storage[0]);
+        for (storage[1 + result.len ..]) |byte| try std.testing.expectEqual(@as(u8, 0xcc), byte);
+    }
+}
+
+test "decodeHexInto validates length before capacity and characters without writing on preflight errors" {
+    var output: [2]u8 = @splat(0xcc);
+    try std.testing.expectError(error.InvalidHexLength, decodeHexInto("g00", output[0..0]));
+    try std.testing.expectError(error.BufferTooSmall, decodeHexInto("gg00", output[0..1]));
+    try std.testing.expectError(error.BufferTooSmall, decodeHexInto("00", output[0..0]));
+    for (output) |byte| try std.testing.expectEqual(@as(u8, 0xcc), byte);
+    try std.testing.expectEqualSlices(u8, "\xab\xcd", try decodeHexInto("aBcD", &output));
+    const before = output;
+    const empty = try decodeHexInto("", output[0..0]);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+    try std.testing.expect(empty.ptr == output[0..].ptr);
+    try std.testing.expectEqualSlices(u8, &before, &output);
+}
+
+test "decodeHexInto rejects invalid characters in SIMD blocks and the scalar tail" {
+    var input: [block_size * 2 + 2]u8 = @splat('0');
+    var output: [input.len / 2]u8 = undefined;
+    for ([_]usize{ 0, block_size - 1, block_size, block_size * 2, input.len - 1 }) |position| {
+        input[position] = 'g';
+        defer input[position] = '0';
+        try std.testing.expectError(error.InvalidCharacter, decodeHexInto(&input, &output));
+    }
 }

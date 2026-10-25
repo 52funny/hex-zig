@@ -61,17 +61,34 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
+To reuse existing buffers or use stack storage without allocating:
+
+```zig
+var encoded_buf: [10]u8 = undefined;
+const encoded = try hex.encodeHexInto("Hello", &encoded_buf, .upper);
+var decoded_buf: [5]u8 = undefined;
+const decoded = try hex.decodeHexInto(encoded, &decoded_buf);
+std.debug.print("{s} -> {s}\n", .{ encoded, decoded });
+// 48656C6C6F -> Hello
+```
+
 Public API:
 
 ```zig
 pub const Case = enum { upper, lower };
 pub fn encodeHex(alloc: std.mem.Allocator, input: []const u8, case: Case) []u8;
+pub fn encodeHexInto(input: []const u8, output: []u8, case: Case) error{BufferTooSmall}![]u8;
 pub fn decodeHex(alloc: std.mem.Allocator, input: []const u8) ![]u8;
+pub fn decodeHexInto(input: []const u8, output: []u8) error{ InvalidHexLength, BufferTooSmall, InvalidCharacter }![]u8;
 ```
 
-- `encodeHex` produces two hexadecimal characters per input byte. It panics if allocation fails.
-- `decodeHex` accepts `0-9`, `a-f`, and `A-F`. It returns `error.InvalidHexLength` for odd-length input, `error.InvalidCharacter` for invalid characters, or `error.OutOfMemory` if allocation fails.
-- Both functions accept empty input without allocating. Free the returned slices with the same allocator, including empty slices.
+Encoding produces two ASCII hexadecimal characters per input byte in the requested `Case` (`.upper` or `.lower`). For `encodeHex`, the encoded length must fit in `usize`. Decoding requires even-length input and accepts only `0-9`, `a-f`, and `A-F`, including mixed case; prefixes such as `0x`, separators, and whitespace are rejected. No function appends a null terminator.
+
+`encodeHex` and `decodeHex` return owned slices. Free them with the same allocator, including empty results. Both accept empty input without allocating. `decodeHex` rejects odd-length input before allocating; otherwise it allocates before validating characters and frees the allocation on validation failure.
+
+The `Into` functions never allocate. Input and output must not overlap. The output buffer may be larger than required: on success, the returned slice is exactly the written prefix of `output`, and the remaining bytes are unchanged. Its lifetime and ownership follow the original buffer; do not free the returned prefix independently. Empty input returns `output[0..0]` without writing, even when output capacity is zero.
+
+`encodeHexInto` checks capacity before writing. `decodeHexInto` checks input length first, then capacity, then characters. Odd-length input returns `error.InvalidHexLength`; insufficient capacity returns `error.BufferTooSmall`. These length and capacity errors leave the buffer unchanged. Invalid characters return `error.InvalidCharacter` and may leave partially written output; discard that output after an error.
 
 ## Benchmarks
 
