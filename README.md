@@ -133,10 +133,10 @@ Inputs shorter than the SIMD block use scalar code. These results describe one r
 Run these commands from this repository's root directory:
 
 ```sh
-zig build                                    # Compile the library and its tests
-zig build test                               # Run unit tests
+zig build                                     # Compile the library and its tests
+zig build test                                # Run unit tests
 zig build test -Doptimize=ReleaseFast         # Run tests in ReleaseFast mode
-zig build example                            # Run the usage example
+zig build example                             # Run the usage example
 zig build bench -Doptimize=ReleaseFast        # Run benchmarks
 ```
 
